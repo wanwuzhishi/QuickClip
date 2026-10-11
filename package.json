@@ -1,0 +1,26 @@
+{
+  "name": "quickclip",
+  "private": true,
+  "version": "0.1.19",
+  "type": "module",
+  "description": "QuickClip - 高性能 Windows 剪切板管理器",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "pack:test": "bash scripts/build-test.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-global-shortcut": "^2.2.0",
+    "@tauri-apps/plugin-store": "^2.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3"
+  }
+}

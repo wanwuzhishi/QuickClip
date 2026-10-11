@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuickClip</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <!-- 顶部工具栏：左侧标签切换，右侧带文字的显式操作按钮。
+           放弃"红绿灯圆点"方案——圆点只能靠颜色和符号区分，含义全靠猜，
+           用户根本找不到设置入口。改为图标 + 文字标签，一眼可辨。 -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="tabs">
+          <button class="tab active" data-tab="clip">剪切板</button>
+          <button class="tab" data-tab="favor">收藏</button>
+          <button class="tab" data-tab="explorer">路径</button>
+        </div>
+
+        <!-- 拖动留白：让标题栏中间这段成为纯粹的拖拽区，
+             窗口较窄时自动收缩，不会把按钮挤出可视区 -->
+        <div class="drag-space" data-tauri-drag-region></div>
+
+        <div class="win-actions">
+          <!-- 固定：置顶常驻开关，开启后面板保持最上层、粘贴后不关闭 -->
+          <button class="tool-btn pin-btn" id="btn-pin" title="固定窗口（置顶常驻，可连续粘贴）">
+            <span class="tool-icon pin-glyph">📌</span>
+            <span class="tool-label">固定</span>
+          </button>
+          <!-- 搜索：显示 / 隐藏搜索栏 -->
+          <button class="tool-btn" id="btn-collapse" title="显示 / 隐藏搜索栏">
+            <span class="tool-icon">🔍</span>
+          </button>
+          <!-- 设置：显式文字标签，永不隐藏 -->
+          <button class="tool-btn settings-btn" id="btn-settings" title="打开设置">
+            <span class="tool-icon gear-glyph">⚙</span>
+            <span class="tool-label">设置</span>
+          </button>
+          <!-- 关闭：隐藏面板到托盘。放在最右侧、与左侧按钮隔一道细分隔线，
+               既符合 Windows 窗口按钮的惯例位置，也避免误点相邻的设置 -->
+          <span class="action-divider" aria-hidden="true"></span>
+          <button class="tool-btn close-btn" id="btn-close" title="隐藏面板（程序继续在托盘运行）">
+            <span class="close-glyph" aria-hidden="true"></span>
+          </button>
+        </div>
+      </header>
+
+      <div class="searchbar" id="searchbar">
+        <div class="search-wrap">
+          <span class="search-icon">🔍</span>
+          <input
+            type="text"
+            id="search"
+            placeholder="搜索剪切板内容…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+      </div>
+
+      <!-- 主体列表 -->
+      <main class="list" id="list"></main>
+
+      <!-- 底部状态栏 -->
+      <footer class="statusbar">
+        <span id="status-text">就绪</span>
+        <span class="hint">单击粘贴 · 回车粘贴 · Alt+V 唤出</span>
+      </footer>
+
+      <!-- 设置面板 -->
+      <div class="overlay" id="settings-overlay">
+        <div class="settings-panel">
+          <div class="settings-head">
+            <span>设置</span>
+            <button class="icon-btn" id="btn-close-settings" title="完成">✕</button>
+          </div>
+          <div class="settings-body" id="settings-body"></div>
+          <div class="settings-foot">
+            <button class="btn primary" id="btn-save-settings">完成</button>
+            <button class="btn" id="btn-open-data">打开数据目录</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右键菜单 -->
+      <div class="ctx-menu" id="ctx-menu"></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

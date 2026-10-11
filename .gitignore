@@ -1,0 +1,53 @@
+# ---------- 依赖 ----------
+node_modules/
+
+# ---------- 构建产物 ----------
+dist/
+dist-ssr/
+dist-release/
+build/
+*.tsbuildinfo
+
+# Rust / Tauri 编译产物（本项目 target 目录可达 8GB+，务必忽略）
+src-tauri/target/
+src-tauri/gen/
+
+# ---------- 编辑器 / IDE ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- 系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 本地配置 ----------
+*.local
+.env
+.env.*
+!.env.example
+
+# ---------- 日志 ----------
+logs/
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 运行期数据（用户剪切板数据 / 配置 / 备份，绝不入库） ----------
+# 这些目录由应用运行时在数据目录生成，可能含用户隐私内容
+userdata.db
+userdata.db-journal
+userdata.db-wal
+Configs/
+Image/
+PanelWindow/
+WindowState/
+_autoBackup/
+
+# ---------- 其他 ----------
+.workbuddy/
