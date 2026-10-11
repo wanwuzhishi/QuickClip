@@ -256,7 +256,7 @@ com.quickclip.app/
 ### 从源码构建
 
 ```bash
-git clone https://github.com/你的用户名/QuickClip.git
+git clone https://github.com/wanwuzhishi/QuickClip.git
 cd QuickClip
 npm install
 npm run tauri:dev     # 开发模式（热重载）
