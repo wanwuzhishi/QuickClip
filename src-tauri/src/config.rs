@@ -90,17 +90,6 @@ pub struct FavorItem {
     pub is_folder: bool,
 }
 
-/// 资源管理器路径访问记录，用于快速跳转。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExplorerRecord {
-    pub id: String,
-    pub path: String,
-    pub update_time: String,
-    #[serde(default)]
-    pub usage_count: i64,
-}
-
 /// 应用主配置。
 ///
 /// 序列化采用 camelCase：Tauri IPC 的惯例是 camelCase，前端 TypeScript
@@ -112,11 +101,8 @@ pub struct ClipConfig {
     pub show_clip_tab: bool,
     pub show_favor_tab: bool,
     pub font_size: f64,
-    pub item_spacing: f64,
-    pub clip_list_spacing: i32,
     pub show_line_number: bool,
     pub clip_list_simple_mode: bool,
-    pub auto_hide_search_box: bool,
 
     /// 最大历史条数，超出后触发清理。
     pub max_item_count: i64,
@@ -128,24 +114,16 @@ pub struct ClipConfig {
     pub ignore_white_space: bool,
     /// 默认按纯文本粘贴，去除格式
     pub plain_text_paste_by_default: bool,
-    /// 粘贴时追加换行
-    pub paste_with_new_line: bool,
     /// 粘贴前延迟毫秒数
     pub default_paste_delay: u64,
     /// 使用数字键直接粘贴
     pub using_number_key_to_paste: bool,
-    /// 清空前是否提醒
-    pub do_not_remind_on_clear: bool,
 
     /// 黑名单进程名，逗号分隔。命中则不记录。
     pub black_list: String,
     /// 白名单进程名，逗号分隔。非空时仅记录命中项。
     pub white_list: String,
 
-    /// 边缘自动隐藏
-    pub enable_edge_hide: bool,
-    /// 悬浮球模式
-    pub use_floating_orb: bool,
     /// 隐藏模式：0 无 / 1 失焦隐藏 / 2 边缘隐藏
     pub hide_mode: i32,
     /// 全局唤出快捷键（Tauri 加速键格式）
@@ -204,24 +182,17 @@ impl Default for ClipConfig {
             show_clip_tab: true,
             show_favor_tab: true,
             font_size: 13.0,
-            item_spacing: 2.0,
-            clip_list_spacing: 1,
             show_line_number: true,
             clip_list_simple_mode: true,
-            auto_hide_search_box: false,
             max_item_count: 500,
             max_item_size: 20000,
             allow_duplicate_copy: false,
             ignore_white_space: true,
             plain_text_paste_by_default: false,
-            paste_with_new_line: false,
             default_paste_delay: 0,
             using_number_key_to_paste: true,
-            do_not_remind_on_clear: false,
             black_list: String::new(),
             white_list: String::new(),
-            enable_edge_hide: true,
-            use_floating_orb: false,
             hide_mode: 2,
             hotkey: "Alt+V".into(),
             theme: "dark".into(),
@@ -285,33 +256,40 @@ fn normalize_keys(s: &str) -> String {
 }
 
 /// 判断内容是否命中过滤规则。返回 true 表示应当记录。
+///
+/// 这条路径**每次复制都会执行**，因此名单匹配不做任何堆分配：
+/// 直接在 `&str` 上迭代，命中即返回。
 pub fn should_capture(cfg: &ClipConfig, source_app: Option<&str>, text: &str) -> bool {
     if cfg.ignore_white_space && text.trim().is_empty() {
         return false;
     }
-    if let Some(app) = source_app {
-        let app_lower = app.to_ascii_lowercase();
-        let white: Vec<&str> = cfg
-            .white_list
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !white.is_empty() {
-            let hit = white.iter().any(|w| app_lower.contains(&w.to_ascii_lowercase()));
-            if !hit {
-                return false;
-            }
-        }
-        let black: Vec<&str> = cfg
-            .black_list
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if black.iter().any(|b| app_lower.contains(&b.to_ascii_lowercase())) {
-            return false;
-        }
+    let Some(app) = source_app else {
+        return true;
+    };
+    let app_lower = app.to_ascii_lowercase();
+
+    // 白名单非空时，只有命中项才记录。
+    // 先探一次是否非空，再判命中——迭代器是即时的，不能"用两次"，
+    // 因此这里用 peekable 而不是 clone。
+    let mut white = cfg
+        .white_list
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .peekable();
+    if white.peek().is_some() && !white.any(|w| app_lower.contains(&w.to_ascii_lowercase())) {
+        return false;
+    }
+
+    // 黑名单命中即排除
+    let mut black = cfg
+        .black_list
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .peekable();
+    if black.peek().is_some() && black.any(|b| app_lower.contains(&b.to_ascii_lowercase())) {
+        return false;
     }
     true
 }

@@ -26,14 +26,12 @@
 
   /* ---- 强调色 ---- */
   --accent: #0a84ff; /* systemBlue dark */
-  --accent-dim: #0060df;
   --accent-soft: rgba(10, 132, 255, 0.16);
 
   /* ---- 语义色 ---- */
   --danger: #ff453a; /* systemRed dark */
   --danger-soft: rgba(255, 69, 58, 0.18);
   --success: #30d158; /* systemGreen dark */
-  --warning: #ffd60a; /* systemYellow dark */
 
   /* ---- 圆角 ---- */
   --radius-window: 14px;
@@ -63,13 +61,11 @@
   --text-ter: rgba(60, 60, 67, 0.3);
 
   --accent: #007aff; /* systemBlue light */
-  --accent-dim: #0062cc;
   --accent-soft: rgba(0, 122, 255, 0.12);
 
   --danger: #ff3b30;
   --danger-soft: rgba(255, 59, 48, 0.14);
   --success: #34c759;
-  --warning: #ffcc00;
 }
 
 * {
@@ -792,6 +788,9 @@ body {
 
 .settings-body::-webkit-scrollbar {
   width: 9px;
+}
+.settings-body::-webkit-scrollbar-track {
+  background: transparent;
 }
 .settings-body::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.18);

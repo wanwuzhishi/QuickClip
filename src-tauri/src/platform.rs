@@ -141,7 +141,10 @@ pub fn window_belongs_to_current_process(hwnd: HWND) -> bool {
 /// 且能正确携带扫描码信息，对 Electron / WPF / UWP 等对 `WM_KEYDOWN`
 /// 的 `lParam` 较真的程序兼容性更好。
 ///
-/// 修饰键与主键之间留出间隔，避免目标程序来不及识别组合键。
+/// 序列固定为 `Ctrl↓ V↓ V↑ Ctrl↑`，**一次性提交**（不是逐个发）。
+/// 末尾的 15ms 间隔留给目标程序收尾：部分程序（尤其是游戏与终端类）
+/// 在 Ctrl 抬起后还需要一点时间才认为组合键结束，过早进行下一次输入
+/// 会丢掉这个组合。
 pub fn send_paste() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
@@ -182,36 +185,8 @@ pub fn send_paste() {
         }
     }
 
-    // 组合键的按下与抬起之间需要极短的间隔，
-    // 否则部分程序（尤其是游戏与终端类）会漏掉这次组合。
+    // 组合键结束后留一点收尾时间，理由见函数文档
     std::thread::sleep(std::time::Duration::from_millis(15));
-}
-
-/// 发送单次按键（如回车）。
-pub fn send_key(vk: u16) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY,
-    };
-
-    fn ev(vk: u16, up: bool) -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk),
-                    wScan: 0,
-                    dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        }
-    }
-    unsafe {
-        let seq = [ev(vk, false), ev(vk, true)];
-        let _ = SendInput(&seq, std::mem::size_of::<INPUT>() as i32);
-    }
 }
 
 /// 全局记录"最近一个非自身的前台窗口"，作为粘贴目标的权威来源。
@@ -583,17 +558,6 @@ pub fn set_no_activate(hwnd: HWND, no_activate: bool) -> bool {
         )
         .is_ok()
     }
-}
-
-/// 查询窗口当前是否带 `WS_EX_NOACTIVATE`。
-pub fn is_no_activate(hwnd: HWND) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
-    };
-    if !is_window(hwnd) {
-        return false;
-    }
-    unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0 }
 }
 
 /// 窗口当前是否可见。

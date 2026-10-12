@@ -21,7 +21,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="$ROOT/dist-release"
 mkdir -p "$OUT_DIR"
 
-echo "==> [1/5] 计算测试版本号"
+echo "==> [1/6] 计算测试版本号"
 
 # 读取 app 当前版本（以 tauri.conf.json 为准，保持单一事实来源）
 CUR_VER="$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")"
@@ -31,7 +31,13 @@ NEW_VER="${MAJ}.${MIN}.${NEXT_PATCH}"
 TEST_TAG="v${NEW_VER}-test.${STAMP}"
 echo "     ${CUR_VER} -> ${NEW_VER}  (标签 ${TEST_TAG})"
 
-echo "==> [2/5] 同步版本号到配置文件"
+echo "==> [2/6] 同步版本号到配置文件"
+# 三处必须一致：package.json、tauri.conf.json、Cargo.toml。
+#
+# Cargo.toml 尤其不能漏：`commands::bootstrap` 用 `env!("CARGO_PKG_VERSION")`
+# 把版本号报给前端，三处不一致时界面会显示一个错误的旧版本号
+# （曾出现 package.json 已是 0.1.19 而 Cargo.toml 仍是 0.1.0，
+# 界面上一直显示 0.1.0）。
 node -e "
 const fs=require('fs');
 const ver='${NEW_VER}';
@@ -41,9 +47,13 @@ for (const f of ['package.json','src-tauri/tauri.conf.json']) {
   fs.writeFileSync(f, JSON.stringify(j,null,2)+'\n');
   console.log('     已更新', f);
 }
+let cargo=fs.readFileSync('src-tauri/Cargo.toml','utf8');
+cargo=cargo.replace(/^version = \".*\"$/m, 'version = \"'+ver+'\"');
+fs.writeFileSync('src-tauri/Cargo.toml', cargo);
+console.log('     已更新 src-tauri/Cargo.toml');
 "
 
-echo "==> [3/5] 准备前端产物目录"
+echo "==> [3/6] 准备前端产物目录"
 # 物理删除 dist/，然后交给 `tauri build` 的 beforeBuildCommand 去构建前端。
 #
 # 为什么不在这里先 `npm run build`：
@@ -57,7 +67,7 @@ echo "==> [3/5] 准备前端产物目录"
 # dist/ 是构建产物，无需保留，物理删除即可绕开。
 rm -rf "$ROOT/dist" && mkdir -p "$ROOT/dist"
 
-echo "==> [4/5] 构建 Tauri 应用与安装包（耗时较长，请耐心等待）"
+echo "==> [4/6] 构建 Tauri 应用与安装包（耗时较长，请耐心等待）"
 npm run tauri build
 
 echo "==> [5/6] 收集产物到 dist-release/"

@@ -1,13 +1,25 @@
 //! Tauri 指令层。前端通过 `invoke` 调用这些函数，构成前后端契约。
 
 use crate::clipboard::ClipService;
-use crate::config::{ClipConfig, ClipItem, ExplorerRecord, FavorItem};
+use crate::config::{ClipConfig, ClipItem, FavorItem};
 use crate::db::Store;
 use crate::util::{now_iso, short_id};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// 取主窗口的裸 HWND（仅 Windows）。
+///
+/// `win.hwnd()` 返回的句柄在各调用点都要做一次指针转换才能传给 `platform`
+/// 的函数；集中到这里，避免同一段转换代码散落五处、改类型时漏改其一。
+#[cfg(windows)]
+fn panel_hwnd(app: &AppHandle) -> Option<windows::Win32::Foundation::HWND> {
+    let win = app.get_webview_window("main")?;
+    win.hwnd()
+        .ok()
+        .map(|h| windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void))
+}
 
 /// 应用全局状态。由 Tauri 托管，各指令按名取用。
 pub struct AppState {
@@ -40,7 +52,6 @@ pub struct BootstrapPayload {
     pub config: ClipConfig,
     pub clips: Vec<ClipItem>,
     pub favors: Vec<FavorItem>,
-    pub explorer: Vec<ExplorerRecord>,
     pub data_dir: String,
     pub version: String,
 }
@@ -59,18 +70,12 @@ pub fn bootstrap(state: State<AppState>) -> BootstrapPayload {
         config: state.config.lock().clone(),
         clips: cache.clips.clone(),
         favors: cache.favors.clone(),
-        explorer: cache.explorer.clone(),
         data_dir,
         version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 
 // ---------- 配置 ----------
-
-#[tauri::command]
-pub fn get_config(state: State<AppState>) -> ClipConfig {
-    state.config.lock().clone()
-}
 
 #[tauri::command]
 pub fn save_config(state: State<AppState>, config: ClipConfig) -> Result<(), String> {
@@ -111,44 +116,65 @@ pub fn copy_clip(
     id: String,
     plain_text: Option<bool>,
 ) -> Result<(), String> {
-    let item = {
+    // 先在剪贴板历史里找，找不到再去收藏夹找。
+    //
+    // 两者的后续处理不同，必须分开：剪贴板条目"复制"后要提升到列表顶部，
+    // 而收藏条目**不能**被写进 clip_item 表——否则"从收藏复制到剪贴板"
+    // 会让收藏内容凭空出现在历史列表里，且每次复制都重复插入一次。
+    let (item, from_clips) = {
         let cache = state.store.cache.read();
-        cache.clips.iter().find(|c| c.id == id).cloned()
-    }
-    .or_else(|| {
-        let cache = state.store.cache.read();
-        cache.favors.iter().find(|c| c.id == id).map(|f| ClipItem {
-            id: f.id.clone(),
-            item: f.item.clone(),
-            create_time: f.create_time.clone(),
-            update_time: f.update_time.clone(),
-            is_top: false,
-            sub_index: 0,
-            source_app: None,
-            hash: String::new(),
-        })
-    })
-    .ok_or_else(|| "条目不存在".to_string())?;
+        if let Some(c) = cache.clips.iter().find(|c| c.id == id) {
+            (c.clone(), true)
+        } else if let Some(f) = cache.favors.iter().find(|c| c.id == id) {
+            (
+                ClipItem {
+                    id: f.id.clone(),
+                    item: f.item.clone(),
+                    create_time: f.create_time.clone(),
+                    update_time: f.update_time.clone(),
+                    is_top: false,
+                    sub_index: 0,
+                    source_app: None,
+                    hash: String::new(),
+                },
+                false,
+            )
+        } else {
+            return Err("条目不存在".to_string());
+        }
+    };
 
     let cfg = state.config.lock().clone();
     state.clip_service.suppress.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    write_to_clipboard(&item, plain_text.unwrap_or(cfg.plain_text_paste_by_default))?;
+    // 图片条目以数据目录为基准寻址（见 resolve_image_path）
+    let data_dir = state.store.db_path.parent().unwrap_or(&state.store.db_path);
+    write_to_clipboard(
+        &item,
+        plain_text.unwrap_or(cfg.plain_text_paste_by_default),
+        data_dir,
+    )?;
 
-    // 提升该条目到列表顶部
-    let mut updated = item.clone();
-    updated.update_time = now_iso();
-    let _ = state.store.upsert_clip(&updated);
-    {
-        let mut c = state.store.cache.write();
-        c.clips.retain(|x| x.id != updated.id);
-        c.clips.insert(0, updated.clone());
+    // 仅剪贴板条目需要提升位置；收藏条目不参与历史排序
+    if from_clips {
+        let mut updated = item.clone();
+        updated.update_time = now_iso();
+        let _ = state.store.upsert_clip(&updated);
+        {
+            let mut c = state.store.cache.write();
+            c.clips.retain(|x| x.id != updated.id);
+            c.clips.insert(0, updated.clone());
+        }
+        let _ = app.emit("clip-updated", &updated);
     }
-    let _ = app.emit("clip-updated", &updated);
     Ok(())
 }
 
-fn write_to_clipboard(item: &ClipItem, plain: bool) -> Result<(), String> {
+fn write_to_clipboard(
+    item: &ClipItem,
+    plain: bool,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
     use crate::config::ObjType;
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     match item.item.obj_type {
@@ -163,7 +189,7 @@ fn write_to_clipboard(item: &ClipItem, plain: bool) -> Result<(), String> {
             cb.set().file_list(&paths).map_err(|e| e.to_string())
         }
         ObjType::Image => {
-            let path = resolve_image_path(&item.item.text);
+            let path = resolve_image_path(&item.item.text, data_dir);
             match image::open(&path) {
                 Ok(img) => {
                     let rgba = img.to_rgba8();
@@ -190,19 +216,27 @@ fn write_to_clipboard(item: &ClipItem, plain: bool) -> Result<(), String> {
     }
 }
 
-/// 图片类型下 text 存的是相对路径，需还原为绝对路径。
-fn resolve_image_path(rel: &str) -> std::path::PathBuf {
+/// 图片类型下 text 存的是相对路径（`Image/xxx.png`），需还原为绝对路径。
+///
+/// **基准必须是数据目录，不能是进程当前工作目录**：保存时用的是
+/// `数据目录/Image/`，而进程的 cwd 取决于用户从哪启动（快捷方式、安装目录、
+/// 甚至资源管理器双击都各不相同），两者一旦不一致，图片就读不到——
+/// 表现为"历史里有图片条目，点粘贴却报读取失败"。
+fn resolve_image_path(rel: &str, data_dir: &std::path::Path) -> std::path::PathBuf {
     if std::path::Path::new(rel).is_absolute() {
         return std::path::PathBuf::from(rel);
     }
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join(rel)
+    data_dir.join(rel)
 }
 
 /// 去除富文本标记，仅保留纯文本。用于"按纯文本粘贴"。
+///
+/// 只剥标签，**不动空白结构**：换行是用户内容的一部分（多行文本按纯文本
+/// 粘贴后应当仍是多行）。早期版本在末尾做了
+/// `split_whitespace().join(" ")`，会把所有换行压成单个空格，
+/// 表现为"粘贴出来变成一行"。
 fn strip_rich(s: &str) -> String {
-    if crate::config::ClipConfig::default().plain_text_paste_by_default || !s.starts_with('<') {
+    if !s.starts_with('<') {
         return s.to_string();
     }
     let mut out = String::with_capacity(s.len());
@@ -215,7 +249,7 @@ fn strip_rich(s: &str) -> String {
             _ => {}
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    out
 }
 
 /// 删除若干条目。
@@ -226,14 +260,6 @@ pub fn delete_clips(app: AppHandle, state: State<AppState>, ids: Vec<String>) ->
         let mut c = state.store.cache.write();
         c.clips.retain(|x| !ids.contains(&x.id));
     }
-    let _ = app.emit("clips-changed", &());
-    Ok(())
-}
-
-#[tauri::command]
-pub fn clear_clips(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    state.store.clear_clips().map_err(|e| e.to_string())?;
-    state.store.cache.write().clips.clear();
     let _ = app.emit("clips-changed", &());
     Ok(())
 }
@@ -261,16 +287,6 @@ pub fn toggle_top(state: State<AppState>, id: String) -> Result<(), String> {
     };
     updated.update_time = now_iso();
     state.store.upsert_clip(&updated).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// 触摸条目，把使用次数与时间前移（用于排序权重）。
-#[tauri::command]
-pub fn touch_clip(state: State<AppState>, id: String) -> Result<(), String> {
-    let mut c = state.store.cache.write();
-    if let Some(it) = c.clips.iter_mut().find(|x| x.id == id) {
-        it.update_time = now_iso();
-    }
     Ok(())
 }
 
@@ -320,70 +336,25 @@ pub fn add_favor(
     };
 
     state.store.upsert_favor(&favor).map_err(|e| e.to_string())?;
+
+    // 挂到父节点下（若有）。先在锁内改内存，再把受影响的父节点收集出来，
+    // 出锁后统一落库——不在持锁状态下做 IO。
+    let mut parent_dirty: Option<FavorItem> = None;
     {
         let mut c = state.store.cache.write();
         c.favors.insert(0, favor.clone());
-        // 挂接到父节点
         if let Some(pid) = &parent_id {
             if let Some(p) = c.favors.iter_mut().find(|f| f.id == *pid) {
                 p.children.push(fid.clone());
-                let p2 = p.clone();
-                drop(c);
-                let _ = state.store.upsert_favor(&p2);
-                let _ = app.emit("favors-changed", &());
-                return Ok(favor);
+                parent_dirty = Some(p.clone());
             }
         }
     }
+    if let Some(p) = &parent_dirty {
+        let _ = state.store.upsert_favor(p);
+    }
     let _ = app.emit("favors-changed", &());
     Ok(favor)
-}
-
-/// 新建收藏分组（文件夹节点）。
-#[tauri::command]
-pub fn add_favor_folder(
-    app: AppHandle,
-    state: State<AppState>,
-    title: String,
-    parent_id: Option<String>,
-) -> Result<FavorItem, String> {
-    let fid = short_id();
-    let folder = FavorItem {
-        id: fid.clone(),
-        item: crate::config::ClipPayload {
-            text: String::new(),
-            obj_type: crate::config::ObjType::Text,
-        },
-        title,
-        create_time: now_iso(),
-        update_time: now_iso(),
-        parent_id: parent_id.unwrap_or_default(),
-        is_deleted: false,
-        description: String::new(),
-        children: Vec::new(),
-        is_folder: true,
-    };
-    state.store.upsert_favor(&folder).map_err(|e| e.to_string())?;
-    state.store.cache.write().favors.insert(0, folder.clone());
-    let _ = app.emit("favors-changed", &());
-    Ok(folder)
-}
-
-#[tauri::command]
-pub fn rename_favor(state: State<AppState>, id: String, title: String) -> Result<(), String> {
-    let updated = {
-        let mut c = state.store.cache.write();
-        match c.favors.iter_mut().find(|f| f.id == id) {
-            Some(f) => {
-                f.title = title;
-                f.update_time = now_iso();
-                f.clone()
-            }
-            None => return Err("条目不存在".into()),
-        }
-    };
-    state.store.upsert_favor(&updated).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -410,30 +381,35 @@ pub fn delete_favor(app: AppHandle, state: State<AppState>, id: String) -> Resul
         state.store.delete_favor(did).map_err(|e| e.to_string())?;
     }
     {
-        let mut c = state.store.cache.write();
-        c.favors.retain(|f| !to_delete.contains(&f.id));
-        for f in c.favors.iter_mut() {
-            let before = f.children.len();
-            f.children.retain(|x| !to_delete.contains(x));
-            if f.children.len() != before {
-                let f2 = f.clone();
-                drop(c);
-                let _ = state.store.upsert_favor(&f2);
-                break;
+        // 摘除各父节点 children 里对被删节点的引用。
+        //
+        // 必须遍历**所有**受影响的父节点并逐个落库：早期实现在找到第一个
+        // children 发生变化的节点后就 break，若同一节点被多个父节点引用
+        // （数据异常或历史遗留），后面的父节点在内存里改了却没写库，
+        // 重启后引用又回来了。
+        //
+        // 先收集再统一写库，避免在持锁状态下调用 store（虽然当前实现不会
+        // 死锁，但"持锁做 IO"是应当避开的模式）。
+        let mut dirty: Vec<FavorItem> = Vec::new();
+        {
+            let mut c = state.store.cache.write();
+            for f in c.favors.iter_mut() {
+                let before = f.children.len();
+                f.children.retain(|x| !to_delete.contains(x));
+                if f.children.len() != before {
+                    dirty.push(f.clone());
+                }
             }
+        }
+        for f in &dirty {
+            let _ = state.store.upsert_favor(f);
         }
     }
     let _ = app.emit("favors-changed", &());
     Ok(())
 }
 
-// ---------- 资源管理器记录 ----------
-
-#[tauri::command]
-pub fn list_explorer(state: State<AppState>) -> Vec<ExplorerRecord> {
-    state.store.cache.read().explorer.clone()
-}
-
+/// 把指定路径交给资源管理器打开。
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
     #[cfg(windows)]
@@ -451,8 +427,6 @@ pub fn open_path(path: String) -> Result<(), String> {
     }
 }
 
-// ---------- 窗口与系统 ----------
-
 /// 按配置策略把面板摆到合适的位置。在 `show()` **之前**调用。
 ///
 /// 三种策略：
@@ -468,18 +442,26 @@ fn apply_window_position(app: &AppHandle, win: &tauri::WebviewWindow, mode: &str
     let w = size.width as i32;
     let h = size.height as i32;
 
-    let cfg = app.state::<AppState>().config.lock().clone();
-    let area = crate::platform::work_area_at_cursor();
-
+    // 只有 `last` / `fixed` 两种策略需要读配置，`cursor`（默认）完全不依赖它。
+    // 因此先判模式，避免每次唤出都 clone 一整份配置。
+    //
+    // `State` 句柄必须先绑定到变量：它是 `app.state()` 返回的临时值，
+    // 直接链式 `.lock()` 会让守卫引用一个已被释放的对象。
     let pos: Option<PhysicalPosition<i32>> = match mode {
-        // 沿用上次位置；首启动（0,0）视为"无记录"，退回跟随鼠标
-        "last" if !(cfg.last_x == 0 && cfg.last_y == 0) => {
-            Some(clamp_to(area, cfg.last_x, cfg.last_y, w, h))
+        "last" | "fixed" => {
+            let state = app.state::<AppState>();
+            let cfg = state.config.lock();
+            let area = crate::platform::work_area_at_cursor();
+            if mode == "fixed" {
+                Some(clamp_to(area, cfg.fixed_x, cfg.fixed_y, w, h))
+            } else if cfg.last_x == 0 && cfg.last_y == 0 {
+                // 沿用上次位置；首启动（0,0）视为"无记录"，退回跟随鼠标
+                cursor_anchored(w, h)
+            } else {
+                Some(clamp_to(area, cfg.last_x, cfg.last_y, w, h))
+            }
         }
-
-        "fixed" => Some(clamp_to(area, cfg.fixed_x, cfg.fixed_y, w, h)),
-
-        // `cursor`，以及 `last` 无历史记录的兜底
+        // `cursor`，以及任何无法识别的值都按跟随鼠标处理
         _ => cursor_anchored(w, h),
     };
 
@@ -591,12 +573,8 @@ pub fn show_panel(app: &AppHandle) {
             //
             // 这样才能保证：无论面板显示、隐藏、还是用户点击它，
             // 目标程序的输入框都**始终不失去焦点**。
-            let hwnd = win.hwnd().map(|h| {
-                windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void)
-            });
-
-            match hwnd {
-                Ok(h) => {
+            match panel_hwnd(app) {
+                Some(h) => {
                     // 先把样式打上，再显示——顺序很重要：
                     // 若先显示后加样式，窗口会经历一次"可激活 → 不可激活"
                     // 的翻转，期间可能短暂抢走前台焦点，正好破坏了我们要保的输入框。
@@ -608,15 +586,14 @@ pub fn show_panel(app: &AppHandle) {
                         let _ = win.show();
                     }
                 }
-                Err(_) => {
+                None => {
                     let _ = win.show();
                 }
             }
         } else {
             // 未开启不夺焦点：恢复普通可激活窗口后再显示。
             #[cfg(windows)]
-            if let Ok(h) = win.hwnd() {
-                let hwnd = windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void);
+            if let Some(hwnd) = panel_hwnd(app) {
                 crate::platform::set_no_activate(hwnd, false);
             }
             state.no_activate.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -641,7 +618,7 @@ pub fn show_panel(app: &AppHandle) {
         // 钩子只装一次，在整个进程生命周期内有效。
         #[cfg(windows)]
         if no_activate {
-            if let Ok(h) = win.hwnd() {
+            if let Some(h) = panel_hwnd(app) {
                 crate::mouse_hook::ensure_installed(h.0 as isize);
             }
         } else {
@@ -660,9 +637,7 @@ pub fn show_panel(app: &AppHandle) {
             #[cfg(windows)]
             {
                 let _ = win.set_always_on_top(true);
-                if let Ok(h) = win.hwnd() {
-                    let hwnd =
-                        windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void);
+                if let Some(hwnd) = panel_hwnd(app) {
                     if !crate::platform::is_topmost(hwnd) {
                         crate::platform::set_topmost(hwnd, true);
                         log::info!("唤出时补设置顶（固定状态）");
@@ -700,8 +675,7 @@ pub fn hide_panel(app: &AppHandle) {
         // 若不恢复，"关掉设置也没用"会变成一个极难排查的残留 bug。
         #[cfg(windows)]
         {
-            if let Ok(h) = win.hwnd() {
-                let hwnd = windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void);
+            if let Some(hwnd) = panel_hwnd(app) {
                 crate::platform::set_no_activate(hwnd, false);
             }
             app.state::<AppState>()
@@ -724,13 +698,10 @@ pub fn hide_panel(app: &AppHandle) {
 pub fn set_search_focusable(app: AppHandle, focusable: bool) {
     #[cfg(windows)]
     {
-        if let Some(win) = app.get_webview_window("main") {
-            if let Ok(h) = win.hwnd() {
-                let hwnd = windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void);
-                // 取反：要能输入 = 不带 NOACTIVATE
-                crate::platform::set_no_activate(hwnd, !focusable);
-                log::debug!("搜索框可聚焦: {focusable}");
-            }
+        if let Some(hwnd) = panel_hwnd(&app) {
+            // 取反：要能输入 = 不带 NOACTIVATE
+            crate::platform::set_no_activate(hwnd, !focusable);
+            log::debug!("搜索框可聚焦: {focusable}");
         }
     }
     #[cfg(not(windows))]
@@ -757,18 +728,10 @@ pub fn set_search_focusable(app: AppHandle, focusable: bool) {
 pub fn poll_hide_request(app: AppHandle) -> bool {
     #[cfg(windows)]
     {
-        if let Some(win) = app.get_webview_window("main") {
-            match win.hwnd() {
-                Ok(h) => {
-                    let hwnd = windows::Win32::Foundation::HWND(h.0 as *mut std::ffi::c_void);
-                    if !crate::platform::is_visible(hwnd) {
-                        return false;
-                    }
-                }
-                Err(_) => return false,
-            }
-        } else {
-            return false;
+        // 面板不可见时直接返回 false，且不消费标志（理由见函数文档）
+        match panel_hwnd(&app) {
+            Some(hwnd) if crate::platform::is_visible(hwnd) => {}
+            _ => return false,
         }
     }
     #[cfg(not(windows))]
@@ -852,10 +815,7 @@ pub fn set_pinned(app: AppHandle, state: State<AppState>, pinned: bool) -> bool 
     if let Some(win) = app.get_webview_window("main") {
         #[cfg(windows)]
         {
-            use windows::Win32::Foundation::HWND;
-
-            if let Ok(raw) = win.hwnd() {
-                let hwnd = HWND(raw.0 as *mut std::ffi::c_void);
+            if let Some(hwnd) = panel_hwnd(&app) {
                 if pinned {
                     // 置顶：先走框架，再校验；失败则用显式 SetWindowPos 兜底
                     let _ = win.set_always_on_top(true);
@@ -1093,17 +1053,13 @@ pub fn set_autostart(
     };
     result.map_err(|e| format!("设置开机自启失败：{e}"))?;
 
-    // 同步到配置文件，保持两者一致
-    let mut cfg = state.config.lock().clone();
-    cfg.auto_start = enabled;
-    cfg.save(&state.config_path).map_err(|e| e.to_string())?;
-    *state.config.lock() = cfg;
+    // 同步到配置文件，保持两者一致。只改一个字段，不必 clone 整份配置
+    // （整份克隆在这里纯属浪费：随后立刻被整体写回，中间没有任何读取）。
+    {
+        let mut cfg = state.config.lock();
+        cfg.auto_start = enabled;
+        let _ = cfg.save(&state.config_path);
+    }
 
     Ok(mgr.is_enabled().unwrap_or(enabled))
-}
-
-/// 查询本次是否为静默启动（供前端在需要时读取）。
-#[tauri::command]
-pub fn launched_silently(state: State<AppState>) -> bool {
-    state.launched_silently
 }

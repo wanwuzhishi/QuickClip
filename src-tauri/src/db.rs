@@ -2,7 +2,7 @@
 //! 主表结构统一为 `Id(PK) + UpdateTime + Data(JSON) + ObjectType + CreatedTime`，
 //! 新增对象种类无需变更表结构。查询走内存缓存，写入异步回落数据库。
 
-use crate::config::{ClipItem, ExplorerRecord, FavorItem};
+use crate::config::{ClipItem, FavorItem};
 use parking_lot::RwLock;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,6 @@ pub enum DbError {
 pub struct Cache {
     pub clips: Vec<ClipItem>,
     pub favors: Vec<FavorItem>,
-    pub explorer: Vec<ExplorerRecord>,
 }
 
 pub struct Store {
@@ -36,6 +35,8 @@ pub struct Store {
     pub db_path: PathBuf,
 }
 
+/// 三类文档共用的表结构：`Id(PK) + UpdateTime + Data(JSON) + ObjectType + CreatedTime`。
+/// 新增对象种类只需加一张同构表，无需改列。
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -54,28 +55,6 @@ CREATE TABLE IF NOT EXISTS favor_item (
     Data        TEXT NOT NULL,
     ObjectType  TEXT,
     CreatedTime TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS explorer_record (
-    Id          TEXT NOT NULL PRIMARY KEY,
-    UpdateTime  TEXT NOT NULL,
-    Data        TEXT NOT NULL,
-    ObjectType  TEXT,
-    CreatedTime TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS common_data (
-    Key         TEXT NOT NULL PRIMARY KEY,
-    Value       TEXT,
-    ReVersion   INTEGER NOT NULL DEFAULT 0
-);
-
--- 迁移标志表。以「属性名_日期」为 key 记录一次性迁移是否执行，
--- 保证跨版本升级时老数据只迁移一次。
-CREATE TABLE IF NOT EXISTS migration (
-    Key         TEXT NOT NULL PRIMARY KEY,
-    Applied     INTEGER NOT NULL DEFAULT 0,
-    AppliedTime TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_clip_update ON clip_item(UpdateTime DESC);
@@ -101,18 +80,19 @@ impl Store {
 
     /// 从数据库全量加载到内存缓存。
     pub fn reload_cache(&self) -> Result<()> {
-        let clips = self.load_all_clips()?;
-        let favors = self.load_all_favors()?;
-        let explorer = self.load_all_explorer()?;
+        let clips = self.load_table::<ClipItem>("clip_item")?;
+        let favors = self.load_table::<FavorItem>("favor_item")?;
         let mut c = self.cache.write();
         c.clips = clips;
         c.favors = favors;
-        c.explorer = explorer;
         Ok(())
     }
 
     /// 通用加载：从指定表读出所有 Data 列并反序列化。
     /// 锁守卫绑定到局部变量，保证 Statement 的借用生命周期有效。
+    ///
+    /// `table` 只接受本模块内的字面量常量（`clip_item` / `favor_item`），
+    /// 不存在外部输入，因此用 `format!` 拼表名是安全的。
     fn load_table<T: serde::de::DeserializeOwned>(&self, table: &str) -> Result<Vec<T>> {
         let guard = self.conn.lock();
         let mut stmt = guard.prepare(&format!(
@@ -126,18 +106,6 @@ impl Store {
             }
         }
         Ok(out)
-    }
-
-    fn load_all_clips(&self) -> Result<Vec<ClipItem>> {
-        self.load_table("clip_item")
-    }
-
-    fn load_all_favors(&self) -> Result<Vec<FavorItem>> {
-        self.load_table("favor_item")
-    }
-
-    fn load_all_explorer(&self) -> Result<Vec<ExplorerRecord>> {
-        self.load_table("explorer_record")
     }
 
     // ---------- 剪贴板 ----------
@@ -192,66 +160,6 @@ impl Store {
         self.conn
             .lock()
             .execute("DELETE FROM favor_item WHERE Id = ?1", params![id])?;
-        Ok(())
-    }
-
-    // ---------- 资源管理器记录 ----------
-
-    pub fn upsert_explorer(&self, item: &ExplorerRecord) -> Result<()> {
-        let data = serde_json::to_string(item)?;
-        self.conn.lock().execute(
-            "INSERT INTO explorer_record (Id, UpdateTime, Data, ObjectType, CreatedTime)
-             VALUES (?1, ?2, ?3, NULL, ?4)
-             ON CONFLICT(Id) DO UPDATE SET UpdateTime = ?2, Data = ?3",
-            params![item.id, item.update_time, data, item.update_time],
-        )?;
-        Ok(())
-    }
-
-    // ---------- 通用 KV ----------
-
-    pub fn set_common(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.lock().execute(
-            "INSERT INTO common_data (Key, Value, ReVersion) VALUES (?1, ?2, 0)
-             ON CONFLICT(Key) DO UPDATE SET Value = ?2, ReVersion = ReVersion + 1",
-            params![key, value],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_common(&self, key: &str) -> Result<Option<String>> {
-        let guard = self.conn.lock();
-        let mut stmt = guard.prepare("SELECT Value FROM common_data WHERE Key = ?1")?;
-        let mut rows = stmt.query(params![key])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(r.get(0)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    // ---------- 迁移 ----------
-
-    /// 判断某次迁移是否已执行。
-    /// 直接查 migration 表，不经 get_common，避免在同名方法链上重复加锁。
-    pub fn migration_applied(&self, key: &str) -> Result<bool> {
-        let guard = self.conn.lock();
-        let mut stmt = guard.prepare("SELECT Applied FROM migration WHERE Key = ?1")?;
-        let mut rows = stmt.query(params![key])?;
-        if let Some(r) = rows.next()? {
-            Ok(r.get::<_, i64>(0)? == 1)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// 标记迁移已执行。
-    pub fn mark_migration(&self, key: &str) -> Result<()> {
-        self.conn.lock().execute(
-            "INSERT INTO migration (Key, Applied, AppliedTime) VALUES (?1, 1, datetime('now'))
-             ON CONFLICT(Key) DO UPDATE SET Applied = 1, AppliedTime = datetime('now')",
-            params![key],
-        )?;
         Ok(())
     }
 }

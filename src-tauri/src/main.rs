@@ -31,7 +31,6 @@ fn main() {
     let launched_silently = std::env::args().any(|a| a == SILENT_FLAG);
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![SILENT_FLAG]),
@@ -59,14 +58,17 @@ fn main() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-            // 迁移必须在创建新目录之前执行：否则新目录一旦存在，
-            // "新目录为空即视为首次运行"的判断会失效。
-            migrate_legacy_data_dir(&data_dir);
-
+            // 建目录 → 初始化日志 → 数据迁移。
+            //
+            // 日志必须先于迁移：迁移过程本身要写日志（迁没迁、走了哪条路径、
+            // 失败原因），否则排查"老数据为何没跟上来"时只能看到空文件。
+            // 此前顺序相反，迁移日志全部丢失。
+            //
+            // 先建目录不会破坏迁移判断：`migrate_legacy_data_dir` 看的是
+            // "新目录**有条目**"而非"目录存在"，空目录照样会触发迁移。
             std::fs::create_dir_all(&data_dir)?;
-
-            // 日志落盘，便于排查"静默启动是否生效"这类无法直接观察的行为
             init_file_logger(&data_dir);
+            migrate_legacy_data_dir(&data_dir);
 
             let db_path = data_dir.join("userdata.db");
             let config_path = data_dir.join("Configs").join("ClipConfig.json");
@@ -207,20 +209,14 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
-            commands::get_config,
             commands::save_config,
             commands::list_clips,
             commands::copy_clip,
             commands::delete_clips,
-            commands::clear_clips,
             commands::toggle_top,
-            commands::touch_clip,
             commands::list_favors,
             commands::add_favor,
-            commands::add_favor_folder,
-            commands::rename_favor,
             commands::delete_favor,
-            commands::list_explorer,
             commands::open_path,
             commands::toggle_panel,
             commands::hide_window,
@@ -229,7 +225,6 @@ fn main() {
             commands::rebind_hotkey,
             commands::get_autostart,
             commands::set_autostart,
-            commands::launched_silently,
             commands::get_pinned,
             commands::set_pinned,
             commands::set_search_focusable,

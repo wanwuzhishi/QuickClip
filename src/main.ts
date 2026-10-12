@@ -43,19 +43,11 @@ interface FavorItem {
   isFolder: boolean;
 }
 
-interface ExplorerRecord {
-  id: string;
-  path: string;
-  updateTime: string;
-  usageCount: number;
-}
-
 interface ClipConfig {
   [key: string]: unknown;
   showClipTab: boolean;
   showFavorTab: boolean;
   fontSize: number;
-  clipListSpacing: number;
   showLineNumber: boolean;
   clipListSimpleMode: boolean;
   maxItemCount: number;
@@ -63,14 +55,10 @@ interface ClipConfig {
   allowDuplicateCopy: boolean;
   ignoreWhiteSpace: boolean;
   plainTextPasteByDefault: boolean;
-  pasteWithNewLine: boolean;
   defaultPasteDelay: number;
   usingNumberKeyToPaste: boolean;
-  doNotRemindOnClear: boolean;
   blackList: string;
   whiteList: string;
-  enableEdgeHide: boolean;
-  useFloatingOrb: boolean;
   hideMode: number;
   hotkey: string;
   theme: string;
@@ -88,7 +76,6 @@ interface BootstrapPayload {
   config: ClipConfig;
   clips: ClipItem[];
   favors: FavorItem[];
-  explorer: ExplorerRecord[];
   dataDir: string;
   version: string;
 }
@@ -99,19 +86,17 @@ let state: {
   config: ClipConfig;
   clips: ClipItem[];
   favors: FavorItem[];
-  explorer: ExplorerRecord[];
   dataDir: string;
   version: string;
 } = {
   config: {} as ClipConfig,
   clips: [],
   favors: [],
-  explorer: [],
   dataDir: "",
   version: "",
 };
 
-let activeTab: "clip" | "favor" | "explorer" = "clip";
+let activeTab: "clip" | "favor" = "clip";
 let selectedIndex = 0;
 let query = "";
 /** 窗口是否固定（置顶常驻）。固定时粘贴后不自动关闭。 */
@@ -142,7 +127,6 @@ async function init() {
   state.config = data.config;
   state.clips = data.clips;
   state.favors = data.favors;
-  state.explorer = data.explorer;
   state.dataDir = data.dataDir;
   state.version = data.version;
 
@@ -458,7 +442,6 @@ function ensureVisible() {
 /** 当前标签页下可通过键盘选择的条目（扁平化顺序）。 */
 function currentSelectableItems(): { id: string }[] {
   if (activeTab === "clip") return state.clips;
-  if (activeTab === "explorer") return state.explorer;
   return flattenFavors();
 }
 
@@ -481,8 +464,7 @@ function flattenFavors(): FavorItem[] {
 
 function render() {
   if (activeTab === "clip") renderClips();
-  else if (activeTab === "favor") renderFavors();
-  else renderExplorer();
+  else renderFavors();
   updateStatus();
 }
 
@@ -495,14 +477,9 @@ function renderClips() {
     return;
   }
 
-  const total = state.clips.reduce((a, c) => a + c.item.text.length, 0);
   $list.innerHTML = state.clips
     .map((it, i) => renderClipRow(it, i))
     .join("");
-
-  if (total > 200000) {
-    // 超大数据集时提示虚拟滚动优化空间（后续可替换为窗口化渲染）
-  }
 
   bindItemEvents();
 }
@@ -565,14 +542,17 @@ function renderFavors() {
     return;
   }
 
+  // 一次性建立 id → 序号 的映射，避免渲染时对每个条目做一次线性查找
+  // （早期用 flat.findIndex，收藏条目多时是 O(n²)）。
   const flat = flattenFavors();
+  const indexOf = new Map(flat.map((f, i) => [f.id, i]));
   const html: string[] = [];
   const walk = (parentId: string, depth: number) => {
     if (depth > 4) return;
     state.favors
       .filter((f) => f.parentId === parentId && !f.isDeleted)
       .forEach((f) => {
-        const idx = flat.findIndex((x) => x.id === f.id);
+        const idx = indexOf.get(f.id) ?? -1;
         if (f.isFolder) {
           const open = expandedFolders.has(f.id);
           html.push(`
@@ -613,26 +593,6 @@ function renderFavorRow(f: FavorItem, idx: number, depth: number): string {
         <button class="mini-btn" data-act="del" title="删除">🗑</button>
       </div>
     </div>`;
-}
-
-function renderExplorer() {
-  if (state.explorer.length === 0) {
-    $list.innerHTML = emptyState("暂无路径记录", "在资源管理器中访问过的路径会记录在此");
-    return;
-  }
-  $list.innerHTML = state.explorer
-    .map(
-      (r, i) => `
-    <div class="item${i === selectedIndex ? " selected" : ""}" data-id="${r.id}" data-index="${i}" data-explorer="1">
-      <div class="item-num">${i < 9 && state.config.showLineNumber ? i + 1 : "📁"}</div>
-      <div class="item-body">
-        <div class="item-text">${esc(r.path)}</div>
-        <div class="item-meta"><span>${timeAgo(r.updateTime)}</span></div>
-      </div>
-    </div>`
-    )
-    .join("");
-  bindItemEvents();
 }
 
 function bindItemEvents() {
@@ -678,7 +638,7 @@ function emptyState(title: string, sub: string): string {
 }
 
 function updateStatus() {
-  const counts = `剪切板 ${state.clips.length} · 收藏 ${state.favors.length} · 路径 ${state.explorer.length}`;
+  const counts = `剪切板 ${state.clips.length} · 收藏 ${state.favors.length}`;
   $status.textContent = counts;
 }
 
@@ -749,12 +709,8 @@ async function pasteItem(id: string, plain: boolean) {
   }
 }
 
+/** 激活列表项：两个标签页的行为一致，都是立即粘贴。 */
 async function activateItem(id: string, plain: boolean) {
-  if (activeTab === "explorer") {
-    const rec = state.explorer.find((r) => r.id === id);
-    if (rec) invoke("open_path", { path: rec.path });
-    return;
-  }
   await pasteItem(id, plain);
 }
 
@@ -790,31 +746,25 @@ function setStatus(msg: string) {
 
 function showCtxMenu(x: number, y: number, id: string, node: HTMLElement) {
   const menu = document.getElementById("ctx-menu")!;
-  const isExplorer = !!node.dataset.explorer;
   const isFavor = !!node.dataset.favor;
 
-  let items: string[] = [];
-  if (isExplorer) {
-    items = [`<div class="ctx-item" data-cmd="open">打开路径</div>`];
-  } else if (isFavor) {
-    items = [
-      `<div class="ctx-item" data-cmd="paste">粘贴</div>`,
-      `<div class="ctx-item" data-cmd="copy">复制到剪切板</div>`,
-      `<div class="ctx-sep"></div>`,
-      `<div class="ctx-item danger" data-cmd="del">删除</div>`,
-    ];
-  } else {
-    items = [
-      `<div class="ctx-item" data-cmd="paste">粘贴</div>`,
-      `<div class="ctx-item" data-cmd="plain">纯文本粘贴</div>`,
-      `<div class="ctx-item" data-cmd="copy">复制到剪切板</div>`,
-      `<div class="ctx-sep"></div>`,
-      `<div class="ctx-item" data-cmd="pin">置顶 / 取消置顶</div>`,
-      `<div class="ctx-item" data-cmd="favor">加入收藏</div>`,
-      `<div class="ctx-sep"></div>`,
-      `<div class="ctx-item danger" data-cmd="del">删除</div>`,
-    ];
-  }
+  const items = isFavor
+    ? [
+        `<div class="ctx-item" data-cmd="paste">粘贴</div>`,
+        `<div class="ctx-item" data-cmd="copy">复制到剪切板</div>`,
+        `<div class="ctx-sep"></div>`,
+        `<div class="ctx-item danger" data-cmd="del">删除</div>`,
+      ]
+    : [
+        `<div class="ctx-item" data-cmd="paste">粘贴</div>`,
+        `<div class="ctx-item" data-cmd="plain">纯文本粘贴</div>`,
+        `<div class="ctx-item" data-cmd="copy">复制到剪切板</div>`,
+        `<div class="ctx-sep"></div>`,
+        `<div class="ctx-item" data-cmd="pin">置顶 / 取消置顶</div>`,
+        `<div class="ctx-item" data-cmd="favor">加入收藏</div>`,
+        `<div class="ctx-sep"></div>`,
+        `<div class="ctx-item danger" data-cmd="del">删除</div>`,
+      ];
 
   menu.innerHTML = items.join("");
   menu.classList.add("show");
@@ -835,10 +785,6 @@ function showCtxMenu(x: number, y: number, id: string, node: HTMLElement) {
       else if (cmd === "pin") await togglePin(id);
       else if (cmd === "favor") await addToFavor(id);
       else if (cmd === "del") await deleteItem(id);
-      else if (cmd === "open") {
-        const rec = state.explorer.find((r) => r.id === id);
-        if (rec) invoke("open_path", { path: rec.path });
-      }
     });
   });
 }
@@ -885,7 +831,6 @@ const SETTINGS: (FieldDef | { section: string })[] = [
   { section: "粘贴行为" },
   { key: "usingNumberKeyToPaste", label: "数字键直接粘贴", desc: "按 1-9 直接粘贴对应条目", type: "bool" },
   { key: "plainTextPasteByDefault", label: "默认纯文本粘贴", desc: "去除富文本格式", type: "bool" },
-  { key: "pasteWithNewLine", label: "粘贴时追加换行", type: "bool" },
   { key: "defaultPasteDelay", label: "粘贴延迟(毫秒)", desc: "应对响应较慢的目标程序", type: "number", min: 0, max: 2000 },
 
   { section: "启动与后台" },
@@ -906,16 +851,12 @@ const SETTINGS: (FieldDef | { section: string })[] = [
     { value: "1", label: "失焦即隐藏" },
     { value: "2", label: "手动隐藏" },
   ]},
-  { key: "enableEdgeHide", label: "边缘自动隐藏", type: "bool" },
   { key: "showClipTab", label: "显示「剪切板」页", type: "bool" },
   { key: "showFavorTab", label: "显示「收藏」页", type: "bool" },
 
   { section: "过滤名单" },
   { key: "blackList", label: "黑名单进程", desc: "逗号分隔，命中则不记录", type: "text" },
   { key: "whiteList", label: "白名单进程", desc: "逗号分隔，非空时仅记录命中项", type: "text" },
-
-  { section: "数据" },
-  { key: "doNotRemindOnClear", label: "清空时不提醒", type: "bool" },
 ];
 
 async function openSettings() {
@@ -1059,10 +1000,14 @@ function onHotkeyCaptureKey(e: KeyboardEvent) {
     return;
   }
 
+  // 录入结果只写进按钮的 dataset，**不碰 state.config.hotkey**。
+  //
+  // 这一点是刻意的：`saveSettings` 靠"新值 !== state.config.hotkey"
+  // 来判断快捷键是否变过，从而决定要不要调用 rebind_hotkey。若在这里
+  // 提前写入 state.config，那个判断就恒为 false，结果是"配置存了、
+  // 但全局快捷键从没重新注册"——新组合完全不生效。
   const combo = `${mods}+${main}`;
-  // 写回配置对象；点"完成"时随其它设置一起持久化
-  state.config.hotkey = combo;
-  (btn as HTMLElement).dataset.value = combo;
+  btn.dataset.value = combo;
   endHotkeyCapture();
   btn.querySelector(".hotkey-text")!.textContent = combo;
 }
@@ -1156,8 +1101,12 @@ function renderField(f: FieldDef): string {
   } else if (f.type === "hotkey") {
     // 快捷键录入：不再让用户逐字敲 "Alt+V"，而是点击后直接按组合键，
     // 由键盘事件自动识别。值仍存为字符串，保持后端契约不变。
-    control = `<button type="button" class="hotkey-input" data-key="${f.key}" data-type="hotkey">
-        <span class="hotkey-text">${esc(String(val ?? "")) || "点击录入"}</span>
+    //
+    // data-value 是"本次编辑的值"：初始等于配置里的当前值，
+    // 录入后被 onHotkeyCaptureKey 覆写。saveSettings 据此判断是否变过。
+    const cur = String(val ?? "");
+    control = `<button type="button" class="hotkey-input" data-key="${f.key}" data-type="hotkey" data-value="${esc(cur)}">
+        <span class="hotkey-text">${esc(cur) || "点击录入"}</span>
       </button>`;
   } else {
     control = `<input type="text" data-key="${f.key}" data-type="text" value="${esc(String(val ?? ""))}" />`;
@@ -1196,8 +1145,10 @@ async function saveSettings() {
       (next[key] as unknown as unknown) =
         typeof current === "number" ? parseInt(v, 10) : v;
     } else if (type === "hotkey") {
-      // 值已在录入时写入 state.config，这里直接沿用
-      (next[key] as unknown as string) = state.config.hotkey;
+      // 录入结果存在 dataset.value 里（见 onHotkeyCaptureKey）；
+      // 未重新录入时它等于原值，据此判断快捷键是否变过。
+      const captured = node.dataset.value ?? "";
+      (next[key] as unknown as string) = captured;
     } else {
       (next[key] as unknown as string) = (node as HTMLInputElement).value;
     }
@@ -1268,8 +1219,14 @@ function stripHtml(s: string): string {
 }
 
 function assetUrl(rel: string): string {
-  // 图片以相对路径记录，经 Tauri 资源协议加载
-  return `http://asset.localhost/${encodeURIComponent(rel)}`;
+  // 图片以相对路径记录（如 `Image/20261011_120000_123.png`），经 Tauri 的
+  // asset 协议加载。
+  //
+  // **必须用 `encodeURI` 而非 `encodeURIComponent`**：后者会把路径分隔符
+  // `/` 一并编码成 `%2F`，得到 `Image%2Fxxx.png`，资源协议按字面路径
+  // 找不到文件，表现为"列表里图片位置空白"。
+  // `encodeURI` 只转义非法字符，保留 `/`、`:` 等路径结构字符。
+  return `http://asset.localhost/${encodeURI(rel)}`;
 }
 
 function timeAgo(iso: string): string {
