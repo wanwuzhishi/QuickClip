@@ -378,4 +378,20 @@ mod tests {
         assert!(c.show_without_activating);
         assert!(c.start_minimized);
     }
+
+    /// 三键组合（如 Ctrl+Alt+L）必须能正确解析。
+    ///
+    /// 用户明确要求支持这类组合，因此单独锁定：
+    /// 修饰键求并集、主键独立识别、且大小写不敏感。
+    #[test]
+    fn three_key_combo_parses() {
+        use tauri_plugin_global_shortcut::{Code, Modifiers};
+        let sc = crate::hotkey::parse("Ctrl+Alt+L").expect("Ctrl+Alt+L 应可解析");
+        assert_eq!(sc.mods, Modifiers::CONTROL | Modifiers::ALT);
+        assert_eq!(sc.key, Code::KeyL);
+        // 小写形式同样合法
+        let lower = crate::hotkey::parse("ctrl+alt+l").expect("小写形式应可解析");
+        assert_eq!(lower.mods, Modifiers::CONTROL | Modifiers::ALT);
+        assert_eq!(lower.key, Code::KeyL);
+    }
 }

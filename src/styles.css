@@ -300,16 +300,20 @@ body {
 
 /* 关闭按钮：用 CSS 画一个 × 号，而非文字 "✕"。
    文字符号在不同字体下大小、基线都不同，混在图标行里会显得歪；
-   两条等长线段交叉则能精确居中，粗细、颜色也可控。 */
-.close-btn .close-glyph {
+   两条等长线段交叉则能精确居中，粗细、颜色也可控。
+
+   该类**不绑定具体容器**：主界面工具栏与设置面板头部的关闭按钮
+   共用同一套画法，避免两处 × 的粗细、尺寸不一致。 */
+.close-glyph {
   position: relative;
   width: 12px;
   height: 12px;
   display: inline-block;
+  flex-shrink: 0;
 }
 
-.close-btn .close-glyph::before,
-.close-btn .close-glyph::after {
+.close-glyph::before,
+.close-glyph::after {
   content: "";
   position: absolute;
   top: 50%;
@@ -321,19 +325,42 @@ body {
   transition: background var(--dur-fast) var(--ease-standard);
 }
 
-.close-btn .close-glyph::before {
+.close-glyph::before {
   transform: translateY(-50%) rotate(45deg);
 }
 
-.close-btn .close-glyph::after {
+.close-glyph::after {
   transform: translateY(-50%) rotate(-45deg);
 }
 
 /* 悬停时给关闭按钮一点"危险"暗示：淡红底 + 红字。
-   这是 Windows 标题栏关闭键的既有心智，不需要重新教育用户。 */
-.close-btn:hover {
+   这是 Windows 标题栏关闭键的既有心智，不需要重新教育用户。
+   主界面与设置面板的关闭按钮都走这条规则。 */
+.close-btn:hover,
+.settings-head .icon-btn:hover {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* 设置面板头部的关闭按钮。
+   此前这个按钮在 CSS 里**没有任何规则**，靠浏览器默认渲染——
+   表现为无圆角、无悬停反馈、且用的是字体字符 ✕（粗细与基线由系统
+   字体决定），与用 CSS 画线的 × 摆在一起明显不是一套东西。
+   现在补齐：统一尺寸、圆角、过渡，以及悬停的淡红底。 */
+.settings-head .icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
 }
 
 /* ---------- 搜索框：macOS 圆角搜索框 ---------- */
