@@ -109,6 +109,18 @@ let windowPinned = false;
  * 进行到一半时被提前隐藏，与流程自身的 hide 竞争。
  */
 let pasting = false;
+/**
+ * 是否正在切换固定状态。
+ *
+ * 用途与 `pasting` 同构：`toggleWindowPin` 调 `set_pinned` 时，
+ * 后端会改 `no_activate` 样式（可激活 ↔ NOACTIVATE），这个样式变更
+ * 会触发 `blur`。而此时 `windowPinned` 还没更新（赋值在 `await` 之后），
+ * `blur` 处理器读到旧值，`hideMode===1` 时会错误隐藏窗口——
+ * 表现为"点固定按钮反而把窗口关了"。
+ *
+ * 在 `invoke` 前后置位/清位，blur 与轮询在此期间一律豁免。
+ */
+let pinTransitioning = false;
 /** 已展开的文件夹 ID */
 const expandedFolders = new Set<string>();
 
@@ -269,10 +281,14 @@ function bindUi() {
   // 相似（面板确实应该消失），但它会与粘贴流程自己的 hide 竞争，
   // 且在粘贴失败时把面板藏掉、用户看不到错误提示。
   //
+  // 固定状态切换中同样豁免：set_pinned 改 no_activate 样式会触发 blur，
+  // 而此时 windowPinned 还没更新（赋值在 await 之后），blur 读到旧值，
+  // hideMode===1 时会错误隐藏——表现为"点固定按钮反而把窗口关了"。
+  //
   // 注意：路线 B 下窗口从不成为前台窗口，`blur` 基本不会触发，
   // "点别处隐藏"由全局鼠标钩子负责（见 pollHideRequest）。
   window.addEventListener("blur", () => {
-    if (pasting) return;
+    if (pasting || pinTransitioning) return;
     if (state.config.hideMode === 1 && !isSettingsOpen() && !windowPinned) {
       invoke("hide_window");
     }
@@ -299,8 +315,9 @@ function startHideRequestPolling() {
     try {
       const want = await invoke<boolean>("poll_hide_request");
       if (!want) return;
-      // 固定状态与设置面板打开时豁免（与 blur 逻辑保持一致的判断）
-      if (isSettingsOpen() || windowPinned) return;
+      // 固定状态、设置面板打开、固定切换中 都豁免
+      // （与 blur 逻辑保持一致的判断）
+      if (isSettingsOpen() || windowPinned || pinTransitioning) return;
       await invoke("hide_window");
     } catch {
       /* 忽略：下一次轮询会重试 */
@@ -331,17 +348,30 @@ function toggleSearchBar() {
  * - 未固定：点击条目 → 粘贴一次 → 面板自动关闭（默认的"用完即走"）
  * - 已固定：窗口保持最上层，粘贴后不关闭，便于连续粘贴多条
  *
- * 界面以后端返回的真实状态为准，避免乐观更新与实际不符。
+ * **必须乐观更新 `windowPinned` 并置位 `pinTransitioning`**：
+ * 后端 `set_pinned` 改 `no_activate` 样式时会触发 `blur`，
+ * 而此时 `windowPinned` 若仍是旧值，`hideMode===1` 会错误隐藏窗口——
+ * 表现为"点固定按钮反而把窗口关了"。
+ * 置位后 blur 与轮询在此期间一律豁免，后端失败则回滚。
  */
 async function toggleWindowPin() {
   const next = !windowPinned;
+  const prev = windowPinned;
+  pinTransitioning = true;
+  // 乐观更新：让 blur 处理器在 await 期间读到新值
+  windowPinned = next;
   try {
     const actual = await invoke<boolean>("set_pinned", { pinned: next });
     windowPinned = actual;
     applyPinState(actual);
     setStatus(actual ? "已固定窗口：保持最上层" : "已取消固定：粘贴后自动关闭");
   } catch (e) {
+    // 回滚到原状态
+    windowPinned = prev;
+    applyPinState(prev);
     setStatus(`设置固定状态失败：${e}`);
+  } finally {
+    pinTransitioning = false;
   }
 }
 
