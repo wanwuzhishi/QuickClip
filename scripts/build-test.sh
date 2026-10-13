@@ -67,6 +67,22 @@ echo "==> [3/6] 准备前端产物目录"
 # dist/ 是构建产物，无需保留，物理删除即可绕开。
 rm -rf "$ROOT/dist" && mkdir -p "$ROOT/dist"
 
+# 同时清空历史安装包目录。
+#
+# 这一步是必需的，不是清理癖：`tauri build` 生成的 NSIS 安装包**不会**
+# 覆盖旧文件，而是按版本号追加新文件（QuickClip_0.1.21_x64-setup.exe、
+# QuickClip_0.1.22_x64-setup.exe 会长期共存）。实测该目录曾堆积 19 个，
+# 最早的可追溯到改名前的 ClipForge_0.1.1。
+#
+# 若保留这些残留，后续"哪个安装包是本次构建的"就无法从目录状态判断，
+# 只能靠文件名精确匹配——而只要匹配规则写错一次（历史上正是如此），
+# 用户就会拿到一个版本号标错、内容是完全旧版本的程序。
+#
+# 这些文件在 dist-release/ 里都有归集副本（且已按 3 个版本上限清理），
+# 删除不会丢失任何东西。
+rm -rf "$ROOT/src-tauri/target/release/bundle/nsis"
+mkdir -p "$ROOT/src-tauri/target/release/bundle/nsis"
+
 echo "==> [4/6] 构建 Tauri 应用与安装包（耗时较长，请耐心等待）"
 npm run tauri build
 
@@ -74,21 +90,33 @@ echo "==> [5/6] 收集产物到 dist-release/"
 BUNDLE="$ROOT/src-tauri/target/release/bundle"
 EXE="$ROOT/src-tauri/target/release/quickclip.exe"
 
+# 收集产物。任一必需产物缺失都**立即失败**，不静默跳过：
+# 少一个文件的"成功构建"比直接报错更危险——用户拿到的是不完整的包。
 collect() {
   local src="$1" name="$2"
-  if [ -f "$src" ]; then
-    cp "$src" "$OUT_DIR/$name"
-    echo "     $name"
+  if [ ! -f "$src" ]; then
+    echo "错误：找不到预期的构建产物 $src" >&2
+    echo "      （版本 ${NEW_VER}，标签 ${TEST_TAG}）" >&2
+    exit 1
   fi
+  cp "$src" "$OUT_DIR/$name"
+  echo "     $name"
 }
 
 collect "$EXE" "QuickClip_${TEST_TAG}_portable.exe"
 
-# NSIS 安装包（文件名含版本，统一改名便于识别）
-NSIS="$(ls "$BUNDLE/nsis/"*setup.exe 2>/dev/null | head -1 || true)"
-if [ -n "${NSIS:-}" ]; then
-  collect "$NSIS" "QuickClip_${TEST_TAG}_setup.exe"
-fi
+# NSIS 安装包：**按本次版本号精确匹配文件名**。
+#
+# 绝不能用 `ls ... | head -1` 之类"取目录里第一个"的写法。
+# 曾经正是那么写的，而目录里堆积着从 ClipForge_0.1.1 起的 19 个安装包，
+# `ls` 按字典序排下去 head -1 取到的是 ClipForge_0.1.1——于是安装包被标上
+# 新版本号、内容却是改名前的第一个旧版本。用户看到的现象就是
+# 「安装版和便携版版本号相同，实际版本不一样，安装版还是旧版本」。
+#
+# 现在双保险：上面第 3 步已清空该目录，此处再按精确文件名取，
+# 取不到就直接报错，不再有"取错一个旧包"的可能。
+NSIS="$BUNDLE/nsis/QuickClip_${NEW_VER}_x64-setup.exe"
+collect "$NSIS" "QuickClip_${TEST_TAG}_setup.exe"
 
 echo "==> [6/6] 清理旧产物（只保留最近 ${KEEP_VERSIONS:-3} 个版本）"
 KEEP_VERSIONS="${KEEP_VERSIONS:-3}"
