@@ -810,6 +810,17 @@ pub fn get_pinned(state: State<AppState>) -> bool {
 ///
 /// 返回值取自系统实际样式，而非我们写入的意图值——这样即使系统拒绝了
 /// 某次操作，界面也不会显示一个与事实不符的状态。
+///
+/// **除了 topmost，本函数还必须同步 `no_activate` 样式**：
+///
+/// `show_panel` 的设计是 `no_activate = pinned || show_without_activating`
+/// ——固定时必然走路线 B（永不激活）。但 `set_pinned` **不触发 `show_panel`**，
+/// 所以面板已可见时点固定，`no_activate` 样式不会自动更新。
+///
+/// 后果：用户关闭了"不抢焦点"、唤出面板（可激活窗口）、再点固定，
+/// 面板仍是可激活的——点列表项时面板抢走焦点，与"固定不打断用户"
+/// 的语义直接矛盾。此处显式同步，保证固定后面板立即变成 NOACTIVATE，
+/// 取消固定后按 `show_without_activating` 决定是否恢复可激活。
 #[tauri::command]
 pub fn set_pinned(app: AppHandle, state: State<AppState>, pinned: bool) -> bool {
     if let Some(win) = app.get_webview_window("main") {
@@ -827,12 +838,29 @@ pub fn set_pinned(app: AppHandle, state: State<AppState>, pinned: bool) -> bool 
                     let _ = win.set_always_on_top(false);
                     crate::platform::clear_topmost(hwnd);
                 }
+
                 // 以真实样式为准回写状态，避免"界面说取消了、实际还置顶"
                 let actual = crate::platform::is_topmost(hwnd);
                 state
                     .pinned
                     .store(actual, std::sync::atomic::Ordering::SeqCst);
-                log::info!("窗口固定状态: 请求 {pinned} → 实际 {actual}");
+
+                // 同步 no_activate 样式。固定时必然 NOACTIVATE（不打断用户）；
+                // 取消固定后按"不抢焦点"设置决定是否恢复可激活。
+                // 不读 actual 而读 pinned：置顶操作可能失败，但 no_activate
+                // 的语义只取决于"用户是否要固定"，与系统是否接受置顶无关。
+                let want_no_activate = pinned || {
+                    let cfg = state.config.lock();
+                    cfg.show_without_activating
+                };
+                crate::platform::set_no_activate(hwnd, want_no_activate);
+                state
+                    .no_activate
+                    .store(want_no_activate, std::sync::atomic::Ordering::SeqCst);
+
+                log::info!(
+                    "窗口固定状态: 请求 {pinned} → 实际 {actual}，no_activate={want_no_activate}"
+                );
                 return actual;
             }
         }
@@ -954,10 +982,22 @@ pub fn paste_to_active(app: AppHandle, state: State<AppState>) {
             log::warn!("粘贴已中止：焦点未能回到 {name}（当前前台: {got_name}）");
         }
 
-        // 固定状态下面板需回到最上层（焦点已交给目标，此处只置顶不抢焦点）
+        // 固定状态下面板需回到最上层。
+        //
+        // 与 show_panel 的固定补位逻辑一致：不能只靠框架的
+        // set_always_on_top——它可能被外部程序改 Z 序或权限差异忽略，
+        // 而框架的内部状态标记不会跟着更新。直接用 is_topmost()
+        // 读系统真实样式，发现掉了就补一次 SetWindowPos(HWND_TOPMOST)。
         if pinned {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_always_on_top(true);
+                #[cfg(windows)]
+                if let Some(hwnd) = panel_hwnd(&app) {
+                    if !crate::platform::is_topmost(hwnd) {
+                        crate::platform::set_topmost(hwnd, true);
+                        log::info!("粘贴后补设置顶（固定状态）");
+                    }
+                }
             }
         }
     }
