@@ -943,10 +943,11 @@ let hotkeyCapturing: HTMLElement | null = null;
 function beginHotkeyCapture(btn: HTMLElement) {
   // 再次点击同一按钮 = 取消
   if (hotkeyCapturing === btn) {
-    endHotkeyCapture();
+    endHotkeyCapture(true);
     return;
   }
-  if (hotkeyCapturing) endHotkeyCapture();
+  // 点到另一个录入按钮：先取消前一个（还原它的显示与待存值）
+  if (hotkeyCapturing) endHotkeyCapture(true);
 
   hotkeyCapturing = btn;
   btn.classList.add("capturing");
@@ -957,15 +958,28 @@ function beginHotkeyCapture(btn: HTMLElement) {
   window.addEventListener("keydown", onHotkeyCaptureKey, true);
 }
 
-function endHotkeyCapture() {
+/**
+ * 结束快捷键录入态。
+ *
+ * `restore` 区分两种结束方式，**不能省略这个参数**：
+ * - `true`（取消）：把按钮的显示文字**和** `dataset.value` 一起还原为
+ *   当前配置值。二者必须同时还原——只改文字会让"界面显示旧值、
+ *   实际保存新值"，用户以为没改，设置却被悄悄换掉了。
+ * - `false`（录入成功）：只解绑监听、去掉 capturing 类，
+ *   **不动**刚写进 `dataset.value` 的值。
+ */
+function endHotkeyCapture(restore: boolean) {
   if (!hotkeyCapturing) return;
   hotkeyCapturing.classList.remove("capturing");
   const btn = hotkeyCapturing;
   hotkeyCapturing = null;
   window.removeEventListener("keydown", onHotkeyCaptureKey, true);
-  // 还原显示为当前值
-  const txt = btn.querySelector(".hotkey-text")!;
-  txt.textContent = String(state.config.hotkey || "") || "点击录入";
+
+  if (restore) {
+    const cur = String(state.config.hotkey || "");
+    btn.dataset.value = cur;
+    btn.querySelector(".hotkey-text")!.textContent = cur || "点击录入";
+  }
 }
 
 function onHotkeyCaptureKey(e: KeyboardEvent) {
@@ -975,9 +989,9 @@ function onHotkeyCaptureKey(e: KeyboardEvent) {
   if (!hotkeyCapturing) return;
   const btn = hotkeyCapturing;
 
-  // Esc 取消录入
+  // Esc 取消录入：还原显示与待存值
   if (e.key === "Escape") {
-    endHotkeyCapture();
+    endHotkeyCapture(true);
     return;
   }
 
@@ -1009,8 +1023,11 @@ function onHotkeyCaptureKey(e: KeyboardEvent) {
   // 提前写入 state.config，那个判断就恒为 false，结果是"配置存了、
   // 但全局快捷键从没重新注册"——新组合完全不生效。
   const combo = `${mods}+${main}`;
+  // 先落值，再结束录入态。结束时必须传 `restore=false`——
+  // 传 true 会立刻把刚写进去的 combo 还原成旧配置值，
+  // 于是"界面显示新组合、保存时用的却是旧值"，表现为改不生效。
   btn.dataset.value = combo;
-  endHotkeyCapture();
+  endHotkeyCapture(false);
   btn.querySelector(".hotkey-text")!.textContent = combo;
 }
 
@@ -1121,6 +1138,12 @@ function renderField(f: FieldDef): string {
 }
 
 async function saveSettings() {
+  // 若还停留在快捷键录入态（用户没按组合键就点了「完成」），先取消它。
+  // 否则 window 上的 capture 阶段 keydown 监听器会残留，之后用户的每一次
+  // 按键都会被它拦截（e.preventDefault + stopPropagation），
+  // 表现为"关掉设置后键盘失灵"。
+  if (hotkeyCapturing) endHotkeyCapture(true);
+
   const body = document.getElementById("settings-body")!;
   const next: ClipConfig = { ...state.config };
 
@@ -1200,6 +1223,8 @@ function clearSettingsError() {
 }
 
 function closeSettings() {
+  // 同 saveSettings：残留的录入态监听器会吞掉此后所有按键
+  if (hotkeyCapturing) endHotkeyCapture(true);
   document.getElementById("settings-overlay")!.classList.remove("show");
   // 关闭设置后不再需要键盘输入，立刻收回临时可聚焦状态
   void releaseSearchFocusable();

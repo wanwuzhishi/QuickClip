@@ -972,45 +972,74 @@ pub fn paste_to_active(app: AppHandle, state: State<AppState>) {
 /// 重新注册全局快捷键。
 ///
 /// 用户修改快捷键后必须调用：旧快捷键需注销，新快捷键需注册。
-/// 此前缺失此逻辑，导致改设置后新快捷键完全不生效。
+///
+/// **操作顺序至关重要**：必须是「先注册新的 → 成功后才注销旧的」。
+/// 早先的实现是「先 `unregister_all()` 再注册新键」，这留下了三条
+/// 都会让用户**彻底失去全局快捷键**的失败路径：
+///
+/// - 新组合已被占用 → `register` 失败 → 旧键却已注销
+/// - 新字符串无法解析 → 直接返回错误 → 旧键却已注销
+/// - 新值为空 → 静默返回 Ok → 一个键都没注册
+///
+/// 三者都表现为「改设置改崩了，连原来的快捷键都唤不出面板」，
+/// 而界面上只显示一条注册失败，用户完全看不出快捷键已经没了。
+///
+/// 现在的顺序下，任何一步失败都保持旧键可用，最坏情况只是
+/// 「这次修改没生效」，不会把现有功能弄丢。
 #[tauri::command]
 pub fn rebind_hotkey(app: AppHandle, state: State<AppState>, hotkey: String) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let gs = app.global_shortcut();
 
-    // 先注销全部已注册快捷键，避免旧键残留
-    if let Err(e) = gs.unregister_all() {
-        log::warn!("注销旧快捷键失败: {e}");
-    }
-
+    // 空值一律拒绝：静默接受会把全局快捷键清成"一个都没有"，
+    // 用户将再也无法唤出面板，且设置界面看起来是正常的。
     if hotkey.trim().is_empty() {
-        state.config.lock().hotkey = hotkey;
-        return Ok(());
+        let msg = "快捷键不能为空。请输入一个组合键，例如 Alt+V。".to_string();
+        log::warn!("{msg}");
+        return Err(msg);
     }
 
-    match crate::hotkey::parse(&hotkey) {
-        Some(sc) => {
-            gs.register(sc).map_err(|e| {
-                let msg = format!(
-                    "快捷键「{hotkey}」注册失败：{e}。该组合可能已被系统或其他程序占用，请换一个。"
-                );
-                log::warn!("{msg}");
-                msg
-            })?;
-            // 同步到内存配置，供热键处理器比对
-            state.config.lock().hotkey = hotkey.clone();
-            log::info!("全局快捷键已重新注册: {hotkey}");
-            Ok(())
-        }
-        None => {
-            let msg = format!(
-                "无法解析快捷键「{hotkey}」。格式应为「修饰键+主键」，例如 Alt+V、Ctrl+Shift+V。"
-            );
-            log::warn!("{msg}");
-            Err(msg)
+    // 解析失败直接返回，不碰注册表（旧键保持可用）
+    let new_sc = crate::hotkey::parse(&hotkey).ok_or_else(|| {
+        let msg = format!(
+            "无法解析快捷键「{hotkey}」。格式应为「修饰键+主键」，例如 Alt+V、Ctrl+Shift+V。"
+        );
+        log::warn!("{msg}");
+        msg
+    })?;
+
+    // 取出旧键，稍后新键注册成功再卸它
+    let old_hotkey = state.config.lock().hotkey.clone();
+    let old_sc = if old_hotkey == hotkey {
+        None // 没变化，无需重注册（也避免"卸掉刚注册的同一个键"）
+    } else {
+        crate::hotkey::parse(&old_hotkey)
+    };
+
+    // 先注册新键。失败则旧键仍在，用户顶多是"这次没改成"
+    gs.register(new_sc).map_err(|e| {
+        let msg = format!(
+            "快捷键「{hotkey}」注册失败：{e}。该组合可能已被系统或其他程序占用，请换一个。"
+        );
+        log::warn!("{msg}");
+        msg
+    })?;
+
+    // 新键已就位，现在卸旧键。卸失败只记日志：新键能用，
+    // 多一个旧键残留远好过一个都没有。
+    if let Some(old) = old_sc {
+        if let Err(e) = gs.unregister(old) {
+            log::warn!("注销旧快捷键「{old_hotkey}」失败（新键已生效）: {e}");
         }
     }
+
+    // 同步到内存配置，供热键处理器比对。
+    // 注意此处不写盘：由前端在确认成功后统一 `save_config`，
+    // 避免出现"注册成功但配置没存下来"的中间态。
+    state.config.lock().hotkey = hotkey.clone();
+    log::info!("全局快捷键已重新注册: {hotkey}");
+    Ok(())
 }
 
 /// 打开数据目录。
