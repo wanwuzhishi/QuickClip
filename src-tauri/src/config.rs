@@ -340,4 +340,42 @@ mod tests {
         assert!(crate::hotkey::parse("Alt+Space").is_some());
         assert!(crate::hotkey::parse("ctrl+shift+v").is_some());
     }
+
+    /// 快捷键解析必须大小写不敏感。
+    ///
+    /// 这条测试是回归防线：`parse` 曾改成"零分配、不再预转小写"，
+    /// 若 `parse_key` 的具名主键分支忘了同步改成忽略大小写，
+    /// "Alt+Space" 这种常规写法就会解析失败——而旧实现是支持的。
+    #[test]
+    fn hotkey_parse_is_case_insensitive() {
+        // 修饰键的各种写法
+        assert!(crate::hotkey::parse("ALT+v").is_some());
+        assert!(crate::hotkey::parse("Ctrl+SHIFT+V").is_some());
+        // 具名主键（大小写混合）
+        assert!(crate::hotkey::parse("Alt+Space").is_some());
+        assert!(crate::hotkey::parse("Alt+space").is_some());
+        assert!(crate::hotkey::parse("Alt+SPACE").is_some());
+        assert!(crate::hotkey::parse("Alt+Enter").is_some());
+        assert!(crate::hotkey::parse("Ctrl+Esc").is_some());
+        // 功能键
+        assert!(crate::hotkey::parse("Alt+F5").is_some());
+        assert!(crate::hotkey::parse("Alt+f12").is_some());
+        // 仍然要拒绝无修饰键与无法识别的主键
+        assert!(crate::hotkey::parse("alt+space").is_some()); // 小写也合法
+        assert!(crate::hotkey::parse("Space").is_none());
+        assert!(crate::hotkey::parse("Alt+F13").is_none()); // 超出 F1-F12
+    }
+
+    /// 配置字段的默认值应与文档一致（防止文档与实现漂移）。
+    #[test]
+    fn default_config_matches_documented_values() {
+        let c = ClipConfig::default();
+        assert_eq!(c.hotkey, "Alt+V");
+        assert_eq!(c.theme, "dark");
+        assert_eq!(c.max_item_count, 500);
+        assert_eq!(c.max_item_size, 20000);
+        assert_eq!(c.font_size, 13.0);
+        assert!(c.show_without_activating);
+        assert!(c.start_minimized);
+    }
 }

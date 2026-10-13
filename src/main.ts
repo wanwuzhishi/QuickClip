@@ -144,22 +144,24 @@ async function init() {
     // 查询失败时按未固定处理，不影响使用
   }
 
-  await listen("clip-added", async () => {
+  // 三个事件（新增 / 增删改 / 单条更新）都会改变剪切板列表的内容，
+  // 处理动作完全相同：重新拉一次列表再渲染。
+  //
+  // 合并成一个处理函数，而不是写三份一样的回调——否则将来要给
+  // "列表变化"加逻辑（比如保留滚动位置）时，很容易只改其中一处。
+  const onClipsChanged = async () => {
     state.clips = await invoke<ClipItem[]>("list_clips", { query: null });
     render();
-  });
-  await listen("clips-changed", async () => {
-    state.clips = await invoke<ClipItem[]>("list_clips", { query: null });
-    render();
-  });
+  };
+  await listen("clip-added", onClipsChanged);
+  await listen("clips-changed", onClipsChanged);
+  await listen("clip-updated", onClipsChanged);
+
   await listen("favors-changed", async () => {
     state.favors = await invoke<FavorItem[]>("list_favors");
     render();
   });
-  await listen("clip-updated", async () => {
-    state.clips = await invoke<ClipItem[]>("list_clips", { query: null });
-    render();
-  });
+
   await listen<{ activated: boolean }>("panel-shown", (event) => {
     selectedIndex = 0;
     render();
@@ -168,7 +170,7 @@ async function init() {
     // 输入框（浏览器地址栏联想、编辑器命令面板等）不在唤出瞬间被关闭。
     // 此时若前端执行 $search.focus()，等于把刚保住的焦点又抢回来，修复失效。
     //
-    // 需要输入时改走"临时可聚焦"：见下方 searchFocusMode 的处理。
+    // 需要输入时改走"临时可聚焦"：见 ensureSearchFocusable 的处理。
     if (event.payload?.activated) {
       $search.focus();
       $search.select();
